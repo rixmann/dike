@@ -199,7 +199,7 @@ init([PaxosGroup, Module, Nodes, CopyStateFrom, Replace]) ->
 	    gen_paxos:append_no_reply(UnaffectedMembers, PaxosGroup, {?CHANGE_MEMBER_TAG, Replace, node(), SLP}),
 	    {ok, ClientState} = Module:init(State, [{paxos_group, PaxosGroup}]),
 	    ok=gen_paxos:unlock_log_complete(Replace, PaxosGroup),
-	    gen_paxos:subscribe(PaxosGroup),
+	    gen_paxos:subscribe(PaxosGroup, Module),
 	    ok=gen_paxos:set_and_unlock_log_complete(node(), PaxosGroup, SLP),
 	    {ok, #state{group=PaxosGroup,
 			module=Module,
@@ -215,7 +215,7 @@ init([PaxosGroup, Module, CopyStateFrom]) ->
 	    {SLP, State} = export_state(PaxosGroup, Module, CopyStateFrom),
 	    {ok, ClientState} = Module:init(State, [{paxos_group, PaxosGroup}]),
 	    gen_paxos:unlock_log_complete(CopyStateFrom, PaxosGroup),
-	    gen_paxos:subscribe(PaxosGroup),
+	    gen_paxos:subscribe(PaxosGroup, Module),
 	    ok=gen_paxos:set_and_unlock_log_complete(node(), PaxosGroup, SLP),
 	    {ok, #state{group=PaxosGroup,
 			module=Module,
@@ -227,7 +227,7 @@ init([PaxosGroup, Module, CopyStateFrom]) ->
     end;
 
 init([PaxosGroup, Module]) ->
-    gen_paxos:subscribe(PaxosGroup),
+    gen_paxos:subscribe(PaxosGroup, Module),
     {ok, ClientState} = Module:init([{paxos_group, PaxosGroup}]),
     gen_paxos:unlock_log_complete(node(), PaxosGroup),
     {ok, #state{group=PaxosGroup,

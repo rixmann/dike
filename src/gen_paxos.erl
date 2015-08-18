@@ -27,7 +27,7 @@
 	 append_no_reply/3,
 	 append/4,
 	 newest_outcome/1,
-	 subscribe/1,
+	 subscribe/2,
 	 stop/2,
 	 stop/1,
 	 lock_log_complete/2,
@@ -64,6 +64,7 @@
 		log_complete_locked=false, %% false | {setting_up, From, From2} | {true, From2}
 		paxos_server_persisted=-1,
 		subscriber=nil,
+                subscriber_module=nil,
 		group_members=[],
 		new_persistence_variance,
 		db_adapter,
@@ -249,12 +250,12 @@ append_no_reply(Nodes, GName, V) when is_list(Nodes) ->
 newest_outcome(GName) ->
     gen_server:call(get_group_coordinator_name(GName), newest_outcome).
 
-subscribe(GName) ->
-    case catch gen_server:call(get_group_coordinator_name(GName), {subscribe, self()}, ?INTERCOMM_TIMEOUT) of
+subscribe(GName, Module) ->
+    case catch gen_server:call(get_group_coordinator_name(GName), {subscribe, self(), Module}, ?INTERCOMM_TIMEOUT) of
 	ok ->
 	    ok;
 	_ErrorReason ->
-	    subscribe(GName)
+	    subscribe(GName, Module)
     end.
 
 stop(GName) ->
@@ -382,16 +383,21 @@ handle_call({lock_log_complete, NodeLocking}, From, State=#state{log_complete_lo
 handle_call({lock_log_complete, _}, _From, State) ->
     {reply, busy, State, ?UPDATE_LC_TIMEOUT};
 
-handle_call({append, From, V}, _From2, State= #state{index=I, calls=Calls, log_complete_locked=false}) ->
-    ets:insert(Calls, {I + 1, {From, V}}),
-    start_instance(State, I+1, {From, V}, active),
-    {reply, ok, State#state{index=I+1}, ?UPDATE_LC_TIMEOUT};
+handle_call({append, From, V}, _From2, State= #state{index=I, calls=Calls, log_complete_locked=false, subscriber_module=SubMod}) ->
+    case pre_append_hook(SubMod, V) of
+        true ->
+            ets:insert(Calls, {I + 1, {From, V}}),
+            start_instance(State, I+1, {From, V}, active),
+            {reply, ok, State#state{index=I+1}, ?UPDATE_LC_TIMEOUT};
+        false ->
+            {reply, busy, State, ?UPDATE_LC_TIMEOUT}
+    end;
 
 handle_call({append, _, _}, _, State=#state{log_complete_locked=LCL}) when LCL /= false ->
     {reply, busy, State, ?UPDATE_LC_TIMEOUT};
 
-handle_call({subscribe, PID}, _From, State=#state{subscriber=nil})  ->
-    {reply, ok, State#state{subscriber=PID}, ?UPDATE_LC_TIMEOUT};
+handle_call({subscribe, PID, SubModule}, _From, State=#state{subscriber=nil})  ->
+    {reply, ok, State#state{subscriber=PID, subscriber_module=SubModule}, ?UPDATE_LC_TIMEOUT};
 
 handle_call({round_decided, {{_Grp, Idx}, _N, _V}} , _From, State = #state{index=I, subscriber=Sub, group_name=_GName, paxos_server_persisted=PSP, log_complete=LC, log_complete_locked=LCL, new_persistence_variance=Variance}) when Idx =< I ->
     Lockable = log_complete_lockable(State),
@@ -949,3 +955,9 @@ log_complete_locked_p({setting_up, _ , _}) ->
 
 log_complete_locked_p(_) ->
     false.
+
+pre_append_hook(SubMod, V) ->
+    case erlang:function_exported(SubMod, pre_append, 1) of
+        true -> SubMod:pre_append(V);
+        false -> true
+    end.

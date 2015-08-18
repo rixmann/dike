@@ -3,6 +3,11 @@ dike
 
 A framework for distributed computing and storage.
 
+Version X.X.X - 18 Aug 2015
+---------------------------
+
+* Added optional pre_append/1 hook to paxos servers
+
 Version 1.4.0 - 03 Aug 2015
 ---------------------------
 
