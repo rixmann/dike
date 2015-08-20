@@ -50,6 +50,7 @@
 
 -define(SERVER, ?MODULE).
 -define(UNLOCK_TIMEOUT, timer:minutes(1)).
+-define(LCL_TIMEOUT, application:get_env(dike, replication_lock_timeout, timer:minutes(5))).
 
 -define(UPDATE_LC_TIMEOUT, timer:seconds(5)).
 
@@ -62,6 +63,7 @@
 		log,
 		log_complete=-1,
 		log_complete_locked=false, %% false | {setting_up, From, From2} | {true, From2}
+                log_complete_locked_timer=undefined,
 		paxos_server_persisted=-1,
 		subscriber=nil,
                 subscriber_module=nil,
@@ -343,7 +345,7 @@ handle_call(stop, _From, State=#state{subscriber=Sub, group_name=GName}) ->
 handle_call({set_and_unlock_log_complete, NLC}, From, State=#state{index=I, subscriber=Sub}) when Sub /= nil ->
     gen_server:reply(From, ok),
     NewState = update_log_complete(State#state{log_complete_locked=false, log_complete=NLC, index=max(NLC, I)}),
-    parse_update_log_complete_resp(State, NewState, {noreply});
+    parse_update_log_complete_resp(State, cancel_lcl_timer(NewState), {noreply});
 
 handle_call({unlock_log_complete_after_persisting, ExportedServerState}, From, State=#state{log_complete=LC, index=I, calls=Calls, log_cut=_LC, paxos_server_persisted=PSP, db_adapter={DBMod, DBProc}, subscriber=Sub}) when Sub /= nil ->
     gen_server:reply(From, ok),
@@ -359,23 +361,24 @@ handle_call({unlock_log_complete_after_persisting, ExportedServerState}, From, S
     ets:insert(Calls, {I + 1, {self(), {?SERVER_PERSISTED_TAG, node(), LC}}}),
 
     NewState = update_log_complete(State#state{log_complete_locked=false, paxos_server_persisted=LC}),
-    parse_update_log_complete_resp(State, NewState, {noreply});
+    parse_update_log_complete_resp(State, cancel_lcl_timer(NewState), {noreply});
 
 handle_call(unlock_log_complete, From, State=#state{subscriber=Sub}) when Sub /= nil ->
     gen_server:reply(From, ok),
     NewState = update_log_complete(State#state{log_complete_locked=false}),
-    parse_update_log_complete_resp(State, NewState, {noreply});
+    parse_update_log_complete_resp(State, cancel_lcl_timer(NewState), {noreply});
 
 handle_call({lock_log_complete, NodeLocking}, From, State=#state{log_complete_locked={setting_up, _, NodeLocking}}) ->
-    {noreply, State#state{log_complete_locked={setting_up, From, NodeLocking}}, ?UPDATE_LC_TIMEOUT};
+    NewState = State#state{log_complete_locked={setting_up, From, NodeLocking}},
+    {noreply, NewState, ?UPDATE_LC_TIMEOUT};
 
 handle_call({lock_log_complete, NodeLocking}, _From, State=#state{log_complete_locked={true, NodeLocking}}) ->
-    {reply, ok, State};
+    {reply, ok, start_lcl_timer(cancel_lcl_timer(State)), ?UPDATE_LC_TIMEOUT};
 
 handle_call({lock_log_complete, NodeLocking}, From, State=#state{log_complete_locked=LCL}) when LCL == false ->
     case log_complete_lockable(State) of
 	true ->
-	    {reply, ok, State#state{log_complete_locked={true, NodeLocking}}, ?UPDATE_LC_TIMEOUT};
+	    {reply, ok, start_lcl_timer(State#state{log_complete_locked={true, NodeLocking}}), ?UPDATE_LC_TIMEOUT};
 	false ->
 	    {noreply, State#state{log_complete_locked={setting_up, From, NodeLocking}}, ?UPDATE_LC_TIMEOUT}
     end;
@@ -405,7 +408,8 @@ handle_call({round_decided, {{_Grp, Idx}, _N, _V}} , _From, State = #state{index
 
     S2=if LC - ?PERSISTENCE_INTERVAL -  ?PERSISTENCE_VARIANCE + Variance > PSP , LCL==false , Lockable ->
 	       gen_server:cast(Sub, persist_state),
-	       State#state{log_complete_locked={true, node()}, new_persistence_variance=random:uniform(?PERSISTENCE_VARIANCE * 2)}; %TODO: store gen_paxos state ... don't know at which point....
+	       State#state{log_complete_locked={true, node()}, new_persistence_variance=random:uniform(?PERSISTENCE_VARIANCE * 2)}; 
+               %%TODO: maybe store gen_paxos state ... don't know at which point....
 	  CompLCL ->
 	       State;
 	  true ->
@@ -442,6 +446,8 @@ handle_info(timeout, State) ->
     NewState = update_log_complete(State),
     parse_update_log_complete_resp(State, NewState, {noreply});
 
+handle_info(lcl_timeout, State) ->
+    parse_update_log_complete_resp(State, cancel_lcl_timer(State#state{log_complete_locked=false}), {noreply});
 handle_info(_Info, State) ->
     lager:info([{class, dike}], "in gen_paxos, handle_info called: ~p", [[_Info, State]]),
     {noreply, State, ?UPDATE_LC_TIMEOUT}.
@@ -688,7 +694,7 @@ update_log_complete_request_issued(State=#state{log_complete_locked=LCL,
 	    case log_complete_lockable(S2) of
 		true ->
 		    gen_server:reply(LCL_From, ok),
-		    S2#state{log_complete_locked={true, LockingNode}};
+		    start_lcl_timer(S2#state{log_complete_locked={true, LockingNode}});
 		false ->
 		    update_log_complete(S2)
 	    end;
@@ -961,3 +967,10 @@ pre_append_hook(SubMod, V) ->
         true -> SubMod:pre_append(V);
         false -> true
     end.
+
+start_lcl_timer(State = #state{}) ->
+    {ok, Tref} = timer:send_after(?LCL_TIMEOUT, self(), lcl_timeout),
+    State#state{log_complete_locked_timer = Tref}.
+cancel_lcl_timer(State = #state{log_complete_locked_timer = Tref}) ->
+    timer:cancel(Tref),
+    State#state{log_complete_locked_timer = undefined}.

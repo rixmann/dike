@@ -6,5 +6,6 @@ config :dike,
   db_dir: '/tmp/',
   db_mode: :per_group,
   paxos_timeout: 50,
-  garbage_collect_interval: 10
+  garbage_collect_interval: 10,
+  replication_lock_timeout: :timer.minutes(5)
 
